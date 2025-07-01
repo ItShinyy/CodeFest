@@ -1,0 +1,354 @@
+import jsclub.codefest.sdk.Hero;
+import jsclub.codefest.sdk.algorithm.PathUtils;
+import jsclub.codefest.sdk.base.Node;
+import jsclub.codefest.sdk.model.Element;
+import jsclub.codefest.sdk.model.ElementType;
+import jsclub.codefest.sdk.model.GameMap;
+import jsclub.codefest.sdk.model.Inventory;
+import jsclub.codefest.sdk.model.armors.Armor;
+import jsclub.codefest.sdk.model.obstacles.Obstacle;
+import jsclub.codefest.sdk.model.obstacles.ObstacleTag;
+import jsclub.codefest.sdk.model.players.Player;
+import jsclub.codefest.sdk.model.weapon.Weapon;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+// // Dieu khien logic va hanh dong cua hero.
+public class HeroUtils {
+    private final Hero hero;
+
+    // // Theo doi trang thai
+    private int soRuongDaPha = 0;
+    private boolean cheDoPvp = false;
+    private Node viTriRuongBiTanCongCuoiCung = null;
+
+    public HeroUtils(Hero hero) {
+        this.hero = hero;
+    }
+
+    // // Vong lap logic chinh cho moi luot.
+    public void executeTurn(Object... args) throws IOException {
+        if (args == null || args.length == 0) return;
+
+        // // Cap nhat ban do va lay trang thai nguoi choi hien tai
+        GameMap gameMap = hero.getGameMap();
+        gameMap.updateOnUpdateMap(args[0]);
+        Player nguoiChoi = gameMap.getCurrentPlayer();
+
+        if (nguoiChoi == null || nguoiChoi.getHealth() == 0) return;
+
+        // // Kiem tra giai doan cua game: PvP hay Farm
+        if (cheDoPvp) {
+            xuLyLogicPvp(nguoiChoi, gameMap);
+        } else {
+            xuLyLogicFarm(nguoiChoi, gameMap);
+        }
+    }
+
+    // // Logic de tim vat pham va ruong.
+    // // Logic de tim vat pham va ruong.
+    private void xuLyLogicFarm(Player nguoiChoi, GameMap gameMap) throws IOException {
+        // // *** LOGIC MOI ***
+        // // Uu tien tan cong nguoi choi o gan neu co the
+        if (kiemTraVaTanCongNguoiChoiCoHoi(nguoiChoi, gameMap)) {
+            return; // // Da tan cong hoac di chuyen, ket thuc luot
+        }
+        // // *** KET THUC LOGIC MOI ***
+
+        // // Buoc 1: Kiem tra xem co ruong nao vua bi pha khong va xu ly nhat do
+        if (xuLySauKhiDapRuong(nguoiChoi, gameMap)) {
+            return; // // Ket thuc luot sau khi thuc hien hanh dong lien quan den ruong
+        }
+
+        // // Buoc 2: Tim vu khi thiet yeu con thieu
+        Inventory trangBi = hero.getInventory();
+        if (trangBi.getGun() == null) {
+            timVaDiChuyenToiVuKhi(gameMap.getAllGun(), nguoiChoi, gameMap);
+            return;
+        }
+        if (trangBi.getMelee() == null) {
+            timVaDiChuyenToiVuKhi(gameMap.getAllMelee(), nguoiChoi, gameMap);
+            return;
+        }
+
+        // // Buoc 3: Tim va tan cong ruong tiep theo
+        xuLyTimRuong(nguoiChoi, gameMap);
+    }
+
+    // // Logic tim va tan cong nguoi choi khac.
+    private void xuLyLogicPvp(Player nguoiChoi, GameMap gameMap) throws IOException {
+        System.out.println("CHẾ ĐỘ PVP: Đang tìm người chơi khác...");
+        List<Player> nguoiChoiKhac = gameMap.getOtherPlayerInfo();
+        if (nguoiChoiKhac.isEmpty()) {
+            System.out.println("Không tìm thấy người chơi nào khác.");
+            return;
+        }
+
+        Player mucTieu = getPlayerGanNhat(nguoiChoiKhac, nguoiChoi);
+        if (mucTieu == null) return;
+
+        int khoangCach = Math.abs(mucTieu.getX() - nguoiChoi.getX()) + Math.abs(mucTieu.getY() - nguoiChoi.getY());
+
+        // // Neu o canh, dung tan cong can chien
+        if (khoangCach == 1) {
+            hero.attack(getHuongTanCong(mucTieu.getX() - nguoiChoi.getX(), mucTieu.getY() - nguoiChoi.getY()));
+        } else {
+            // // Neu khong, di chuyen lai gan
+            List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
+            String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, mucTieu, true);
+            if (duongDi != null && !duongDi.isEmpty()) {
+                hero.move(duongDi);
+            }
+        }
+    }
+
+    // // Kiem tra va xu ly sau khi tan cong mot ruong.
+    // // Kiem tra va xu ly sau khi tan cong mot ruong.
+    private boolean xuLySauKhiDapRuong(Player nguoiChoi, GameMap gameMap) throws IOException {
+        if (viTriRuongBiTanCongCuoiCung == null) {
+            return false;
+        }
+
+        int chestX = viTriRuongBiTanCongCuoiCung.getX();
+        int chestY = viTriRuongBiTanCongCuoiCung.getY();
+
+        // // Kiem tra xem ruong tai vi tri do con ton tai hay khong
+        boolean ruongDaBienMat = gameMap.getListObstacles().stream()
+                .noneMatch(obs -> obs.getX() == chestX && obs.getY() == chestY);
+
+        if (ruongDaBienMat) {
+            System.out.println("Rương đã bị phá! Kiểm tra vật phẩm rơi ra...");
+
+            // // Neu chua dung tren o cua ruong, di chuyen den do
+            if (nguoiChoi.getX() != chestX || nguoiChoi.getY() != chestY) {
+                String huongDi = getHuongTanCong(chestX - nguoiChoi.getX(), chestY - nguoiChoi.getY());
+                if (huongDi != null) {
+                    hero.move(huongDi);
+                }
+                return true; // // Ket thuc luot sau khi di chuyen
+            }
+
+            // // Khi da dung tren o, kiem tra va nhat do tot hon
+            if (nhatDoTotHonTaiViTri(nguoiChoi, gameMap)) {
+                return true; // // Da nhat 1 mon do, ket thuc luot
+            }
+
+            // // Neu khong con do tot de nhat, hoan tat viec pha ruong va reset trang thai
+            System.out.println("Không có vật phẩm nào tốt hơn hoặc đã nhặt hết. Chuyển sang hành động tiếp theo.");
+            soRuongDaPha++;
+            System.out.println("Số rương đã phá: " + soRuongDaPha + "/4");
+            if (soRuongDaPha >= 4) {
+                cheDoPvp = true;
+                System.out.println("Tất cả rương đã bị phá. Chuyển sang chế độ PVP!");
+            }
+
+            // // Dat lai trang thai de tim ruong moi ngay trong luot nay
+            viTriRuongBiTanCongCuoiCung = null;
+
+            // // KHONG return true o day. De logic tiep tuc chay den cac hanh dong khac (tim vu khi, tim ruong moi).
+            return false;
+        }
+
+        return false;
+    }
+
+    // // Tim va nhat bat ky vat pham nao tot hon tai vi tri hien tai cua nguoi choi.
+    private boolean nhatDoTotHonTaiViTri(Player nguoiChoi, GameMap gameMap) throws IOException {
+        List<Element> vatPhamTrenMatDat = getVatPhamTai(gameMap, nguoiChoi.getX(), nguoiChoi.getY());
+        Inventory trangBi = hero.getInventory();
+
+        for (Element item : vatPhamTrenMatDat) {
+            if (kiemTraVatPhamCoTotHonKhong(item, trangBi)) {
+                System.out.println("Tìm thấy vật phẩm tốt hơn: " + item.getId() + ". Đang nhặt...");
+                hero.pickupItem();
+                return true; // // Da thuc hien hanh dong nhat do
+            }
+        }
+        return false; // // Khong co vat pham nao tot hon de nhat
+    }
+
+
+    // // Tim va di chuyen den vu khi gan nhat.
+    private void timVaDiChuyenToiVuKhi(List<Weapon> danhSachVuKhi, Player nguoiChoi, GameMap gameMap) throws IOException {
+        Weapon vuKhiGanNhat = getVuKhiGanNhat(danhSachVuKhi, nguoiChoi);
+        if (vuKhiGanNhat == null) return;
+
+        List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
+        String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, vuKhiGanNhat, false);
+        if (duongDi == null) return;
+
+        if (duongDi.isEmpty()) hero.pickupItem();
+        else hero.move(duongDi);
+    }
+
+    // // Tim mot ruong uu tien va di chuyen de tan cong.
+    private void xuLyTimRuong(Player nguoiChoi, GameMap gameMap) throws IOException {
+        List<Obstacle> danhSachRuong = gameMap.getListChests();
+        if (danhSachRuong.isEmpty()) return;
+
+        Obstacle ruongMucTieu = getRuongUuTien(danhSachRuong, nguoiChoi);
+        if (ruongMucTieu == null) return;
+
+        int dx = ruongMucTieu.getX() - nguoiChoi.getX();
+        int dy = ruongMucTieu.getY() - nguoiChoi.getY();
+
+        if (Math.abs(dx) + Math.abs(dy) == 1) {
+            hero.attack(getHuongTanCong(dx, dy));
+            viTriRuongBiTanCongCuoiCung = new Node(ruongMucTieu.getX(), ruongMucTieu.getY()); // // Ghi nho ruong vua tan cong
+        } else {
+            List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
+            String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, ruongMucTieu, false);
+            if (duongDi != null) hero.move(duongDi);
+        }
+    }
+
+    // // --- Cac phuong thuc ho tro & tien ich ---
+
+    // // So sanh mot vat pham moi voi vat pham trong kho do.
+    private boolean kiemTraVatPhamCoTotHonKhong(Element vatPhamMoi, Inventory trangBi) {
+        if (vatPhamMoi instanceof Weapon vuKhiMoi) {
+            Weapon vuKhiHienTai = switch (vuKhiMoi.getType()) {
+                case GUN -> trangBi.getGun();
+                case MELEE -> trangBi.getMelee();
+                default -> null;
+            };
+            return vuKhiHienTai == null || vuKhiMoi.getDamage() > vuKhiHienTai.getDamage();
+        }
+        if (vatPhamMoi instanceof Armor giapMoi) {
+            Armor giapHienTai = (giapMoi.getType() == ElementType.HELMET) ? trangBi.getHelmet() : trangBi.getArmor();
+            if (giapHienTai == null) return true;
+            return giapMoi.getHealthPoint() > giapHienTai.getHealthPoint();
+        }
+        return false;
+    }
+
+    // // Lay tat ca vat pham tai mot toa do cu the.
+    private List<Element> getVatPhamTai(GameMap gameMap, int x, int y) {
+        List<Element> tatCaVatPham = new ArrayList<>();
+        tatCaVatPham.addAll(gameMap.getListWeapons());
+        tatCaVatPham.addAll(gameMap.getListArmors());
+        return tatCaVatPham.stream()
+                .filter(item -> item.getX() == x && item.getY() == y)
+                .collect(Collectors.toList());
+    }
+
+    // // Lay tat ca cac node ma hero nen tranh khi tim duong.
+    private List<Node> getCacNodeCanTranh(GameMap gameMap) {
+        List<Node> nodes = new ArrayList<>();
+        // // Them cac chuong ngai vat ran, khong the pha huy
+        for (Obstacle obs : gameMap.getListObstacles()) {
+            if (!obs.getTag().contains(ObstacleTag.CAN_GO_THROUGH)) {
+                nodes.add(obs);
+            }
+        }
+        // // Tranh ca nhung nguoi choi khac
+        nodes.addAll(gameMap.getOtherPlayerInfo());
+        return nodes;
+    }
+
+    private Player getPlayerGanNhat(List<Player> players, Player self) {
+        Player nearest = null;
+        double minDistance = Double.MAX_VALUE;
+        for (Player p : players) {
+            double distance = PathUtils.distance(self, p);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = p;
+            }
+        }
+        return nearest;
+    }
+
+    private Weapon getVuKhiGanNhat(List<Weapon> weapons, Player player) {
+        Weapon nearest = null;
+        double minDistance = Double.MAX_VALUE;
+        for (Weapon weapon : weapons) {
+            double distance = PathUtils.distance(player, weapon);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = weapon;
+            }
+        }
+        return nearest;
+    }
+
+    private Obstacle getRuongUuTien(List<Obstacle> chests, Player player) {
+        Obstacle priorityTarget = null;
+        Obstacle fallbackTarget = null;
+        double minPriorityDist = Double.MAX_VALUE;
+        double minFallbackDist = Double.MAX_VALUE;
+
+        for (Obstacle chest : chests) {
+            double dist = PathUtils.distance(player, chest);
+            if ("DRAGON_EGG".equals(chest.getId())) {
+                if (dist < minPriorityDist) {
+                    minPriorityDist = dist;
+                    priorityTarget = chest;
+                }
+            } else {
+                if (dist < minFallbackDist) {
+                    minFallbackDist = dist;
+                    fallbackTarget = chest;
+                }
+            }
+        }
+        return priorityTarget != null ? priorityTarget : fallbackTarget;
+    }
+
+    private String getHuongTanCong(int dx, int dy) {
+        if (dx == 1) return "r";
+        if (dx == -1) return "l";
+        if (dy == 1) return "u";
+        if (dy == -1) return "d";
+        return null;
+    }
+
+    // // Kiem tra va tan cong nguoi choi o gan neu co co hoi, ngay ca khi dang farm.
+    private boolean kiemTraVaTanCongNguoiChoiCoHoi(Player nguoiChoi, GameMap gameMap) throws IOException {
+        Inventory trangBi = hero.getInventory();
+        // // Chi tan cong khi co it nhat mot vu khi
+        if (trangBi.getGun() == null && trangBi.getMelee() == null) {
+            return false;
+        }
+
+        List<Player> nguoiChoiKhac = gameMap.getOtherPlayerInfo();
+        if (nguoiChoiKhac.isEmpty()) {
+            return false;
+        }
+
+        final int KHOANG_CACH_TAN_CONG_CO_HOI = 3; // // Tam phat hien nguoi choi, co the dieu chinh
+        Player mucTieuGanNhat = null;
+        int khoangCachMin = Integer.MAX_VALUE;
+
+        // // Tim nguoi choi gan nhat trong pham vi co the tan cong
+        for (Player doiThu : nguoiChoiKhac) {
+            int khoangCach = Math.abs(doiThu.getX() - nguoiChoi.getX()) + Math.abs(doiThu.getY() - nguoiChoi.getY());
+            if (khoangCach <= KHOANG_CACH_TAN_CONG_CO_HOI && khoangCach < khoangCachMin) {
+                khoangCachMin = khoangCach;
+                mucTieuGanNhat = doiThu;
+            }
+        }
+
+        if (mucTieuGanNhat != null) {
+            System.out.println("Phát hiện người chơi ở gần! Tấn công cơ hội vào: " + mucTieuGanNhat.getId());
+
+            // // Neu o ke ben, tan cong ngay
+            if (khoangCachMin == 1) {
+                hero.attack(getHuongTanCong(mucTieuGanNhat.getX() - nguoiChoi.getX(), mucTieuGanNhat.getY() - nguoiChoi.getY()));
+            } else {
+                // // Neu o xa hon, di chuyen lai gan
+                List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
+                String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, mucTieuGanNhat, true);
+                if (duongDi != null && !duongDi.isEmpty()) {
+                    hero.move(duongDi);
+                }
+            }
+            return true; // // Da thuc hien hanh dong, ket thuc luot
+        }
+
+        return false; // // Khong co muc tieu nao trong tam
+    }
+}
