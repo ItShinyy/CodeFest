@@ -1,0 +1,91 @@
+import jsclub.codefest.sdk.Hero;
+import jsclub.codefest.sdk.base.Node;
+import jsclub.codefest.sdk.model.GameMap;
+import jsclub.codefest.sdk.model.Inventory;
+import jsclub.codefest.sdk.model.obstacles.Obstacle;
+import jsclub.codefest.sdk.model.players.Player;
+import jsclub.codefest.sdk.model.weapon.Weapon;
+
+import java.io.IOException;
+import java.util.List;
+
+/**
+ * Handles all combat logic against other players.
+ */
+public class CombatLogic {
+    private final Hero hero;
+
+    public CombatLogic(Hero hero) {
+        this.hero = hero;
+    }
+
+    /**
+     * Main combat logic. Returns true if a combat action was taken.
+     * OPTIMIZED: Now accepts a cached list of all obstacles.
+     */
+    public boolean handleCombat(Player self, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
+        Inventory inv = hero.getInventory();
+        if (heroUtils.isOutOfRangedAmmo(inv)) {
+            System.out.println("No ranged weapon left. Deferring to other actions.");
+            return false;
+        }
+
+        List<Player> targets = heroUtils.getAttackablePlayers(map);
+        if (targets.isEmpty()) return false;
+
+        Player target = heroUtils.getNearestPlayer(targets, self);
+        if (target == null) return false;
+
+        return attemptAttack(self, target, map, heroUtils, allObstacles);
+    }
+
+    /**
+     * Checks for nearby players to engage opportunistically.
+     * OPTIMIZED: Now accepts a cached list of all obstacles.
+     */
+    public boolean handleOpportunisticAttack(Player self, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
+        Inventory inv = hero.getInventory();
+        if (inv.getGun() == null && inv.getThrowable() == null) {
+            return false;
+        }
+
+        List<Player> enemies = heroUtils.getAttackablePlayers(map);
+        if (enemies.isEmpty()) return false;
+
+        Player nearest = heroUtils.getNearestPlayer(enemies, self);
+        if (nearest != null && heroUtils.getPathUtilsDistance(self, nearest) <= 7) {
+            System.out.println("Nearby player detected! Engaging opportunistically!");
+            return handleCombat(self, map, heroUtils, allObstacles);
+        }
+        return false;
+    }
+
+    private boolean attemptAttack(Player self, Player target, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
+        Inventory inv = hero.getInventory();
+        Weapon special = inv.getSpecial();
+        Weapon gun = inv.getGun();
+        Weapon throwable = inv.getThrowable();
+        double distance = heroUtils.getPathUtilsDistance(self, target);
+        String direction = heroUtils.getAttackDirection(target.getX() - self.getX(), target.getY() - self.getY());
+
+        if (special != null && special.getUseCounts() > 0 && distance <= special.getRange()) {
+            hero.attack(direction); return true;
+        }
+        if (gun != null && gun.getUseCounts() > 0 && distance <= gun.getRange() && heroUtils.hasClearLineOfSight(self, target, map, allObstacles)) {
+            hero.attack(direction); return true;
+        }
+        if (throwable != null && throwable.getUseCounts() > 0 && distance <= throwable.getRange()) {
+            hero.attack(direction); return true;
+        }
+        if (inv.getMelee() != null && distance == 1) {
+            hero.attack(direction); return true;
+        }
+
+        String path = heroUtils.getPathUtilsShortestPath(map, heroUtils.getNodesToAvoid(map, allObstacles), self, target, true);
+        if (path != null && !path.isEmpty()) {
+            hero.move(path);
+            return true;
+        }
+        return false;
+    }
+}
