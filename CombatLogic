@@ -1,18 +1,24 @@
 import jsclub.codefest.sdk.Hero;
-import jsclub.codefest.sdk.base.Node;
 import jsclub.codefest.sdk.model.GameMap;
 import jsclub.codefest.sdk.model.Inventory;
 import jsclub.codefest.sdk.model.obstacles.Obstacle;
 import jsclub.codefest.sdk.model.players.Player;
 import jsclub.codefest.sdk.model.weapon.Weapon;
+import jsclub.codefest.sdk.model.effects.Effect;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Handles all combat logic against other players.
+ * Handles all combat logic with an intelligent action-scoring system.
  */
 public class CombatLogic {
+    // A simple record to hold a potential attack and its calculated score.
+    private record AttackOption(Weapon weapon, double score) {}
+
     private final Hero hero;
 
     public CombatLogic(Hero hero) {
@@ -20,32 +26,25 @@ public class CombatLogic {
     }
 
     /**
-     * Main combat logic. Returns true if a combat action was taken.
-     * OPTIMIZED: Now accepts a cached list of all obstacles.
+     * Main combat logic. If no attack is possible, it falls back to other actions.
      */
     public boolean handleCombat(Player self, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
-        Inventory inv = hero.getInventory();
-        if (heroUtils.isOutOfRangedAmmo(inv)) {
-            System.out.println("No ranged weapon left. Deferring to other actions.");
-            return false;
-        }
-
         List<Player> targets = heroUtils.getAttackablePlayers(map);
         if (targets.isEmpty()) return false;
 
         Player target = heroUtils.getNearestPlayer(targets, self);
         if (target == null) return false;
 
-        return attemptAttack(self, target, map, heroUtils, allObstacles);
+        return findAndExecuteBestAction(self, target, map, heroUtils, allObstacles);
     }
 
     /**
-     * Checks for nearby players to engage opportunistically.
-     * OPTIMIZED: Now accepts a cached list of all obstacles.
+     * Engages nearby players only if a non-melee weapon is available.
      */
     public boolean handleOpportunisticAttack(Player self, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
         Inventory inv = hero.getInventory();
-        if (inv.getGun() == null && inv.getThrowable() == null) {
+        // UPDATED: Only engage if any non-melee weapon is present.
+        if (inv.getGun() == null && inv.getThrowable() == null && inv.getSpecial() == null) {
             return false;
         }
 
@@ -60,32 +59,77 @@ public class CombatLogic {
         return false;
     }
 
-    private boolean attemptAttack(Player self, Player target, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
+    /**
+     * NEW: Evaluates all possible attacks, scores them, and executes the best one.
+     * If no attack is possible, it moves towards the target.
+     */
+    private boolean findAndExecuteBestAction(Player self, Player target, GameMap map, HeroUtils heroUtils, List<Obstacle> allObstacles) throws IOException {
         Inventory inv = hero.getInventory();
-        Weapon special = inv.getSpecial();
-        Weapon gun = inv.getGun();
-        Weapon throwable = inv.getThrowable();
+        List<AttackOption> possibleAttacks = new ArrayList<>();
         double distance = heroUtils.getPathUtilsDistance(self, target);
-        String direction = heroUtils.getAttackDirection(target.getX() - self.getX(), target.getY() - self.getY());
 
-        if (special != null && special.getUseCounts() > 0 && distance <= special.getRange()) {
-            hero.attack(direction); return true;
-        }
-        if (gun != null && gun.getUseCounts() > 0 && distance <= gun.getRange() && heroUtils.hasClearLineOfSight(self, target, map, allObstacles)) {
-            hero.attack(direction); return true;
-        }
-        if (throwable != null && throwable.getUseCounts() > 0 && distance <= throwable.getRange()) {
-            hero.attack(direction); return true;
-        }
-        if (inv.getMelee() != null && distance == 1) {
-            hero.attack(direction); return true;
-        }
+        // Evaluate all available weapons
+        evaluateWeapon(inv.getSpecial(), distance, true, possibleAttacks);
+        evaluateWeapon(inv.getGun(), distance, heroUtils.hasClearLineOfSight(self, target, map, allObstacles), possibleAttacks);
+        evaluateWeapon(inv.getThrowable(), distance, true, possibleAttacks);
+        evaluateWeapon(inv.getMelee(), distance, distance == 1, possibleAttacks);
 
-        String path = heroUtils.getPathUtilsShortestPath(map, heroUtils.getNodesToAvoid(map, allObstacles), self, target, true);
-        if (path != null && !path.isEmpty()) {
-            hero.move(path);
+        // Find the attack with the highest score
+        Optional<AttackOption> bestAttack = possibleAttacks.stream().max(Comparator.comparingDouble(AttackOption::score));
+
+        if (bestAttack.isPresent()) {
+            // Execute the best found attack
+            String direction = heroUtils.getAttackDirection(target.getX() - self.getX(), target.getY() - self.getY());
+            System.out.println("Executing best attack option: " + bestAttack.get().weapon().getId() + " with score " + bestAttack.get().score());
+            hero.attack(direction);
             return true;
+        } else {
+            // If no attack is possible, move closer
+            System.out.println("No valid attack option. Moving closer to target.");
+            String path = heroUtils.getPathUtilsShortestPath(map, heroUtils.getNodesToAvoid(map, allObstacles), self, target, true);
+            if (path != null && !path.isEmpty()) {
+                hero.move(path);
+                return true;
+            }
         }
         return false;
+    }
+
+    /**
+     * Helper to evaluate a single weapon and add it to the list of possible attacks if valid.
+     */
+    private void evaluateWeapon(Weapon weapon, double distance, boolean isConditionMet, List<AttackOption> options) {
+        if (weapon != null && weapon.getUseCounts() != 0 && distance <= weapon.getRange() && isConditionMet) {
+            double score = calculateAttackScore(weapon);
+            options.add(new AttackOption(weapon, score));
+        }
+    }
+
+    /**
+     * NEW: Calculates a score for a weapon based on damage and special effects.
+     */
+    private double calculateAttackScore(Weapon weapon) {
+        double score = 0;
+
+        // Base score on type
+        switch(weapon.getType()) {
+            case SPECIAL -> score += 50;
+            case GUN -> score += 30;
+            case THROWABLE -> score += 20;
+            case MELEE -> score += 10;
+        }
+
+        // Add weighted damage
+        score += weapon.getDamage() * 1.5;
+
+        // Add huge bonus for debilitating effects
+        if (weapon.getEffects() != null) {
+            for (Effect effect : weapon.getEffects()) {
+                if (List.of("STUN", "PULL", "BLIND", "REVERSE").contains(effect.id)) {
+                    score += 100; // A stun or blind is extremely valuable
+                }
+            }
+        }
+        return score;
     }
 }
