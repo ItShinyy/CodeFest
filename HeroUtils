@@ -1,354 +1,404 @@
 import jsclub.codefest.sdk.Hero;
 import jsclub.codefest.sdk.algorithm.PathUtils;
 import jsclub.codefest.sdk.base.Node;
-import jsclub.codefest.sdk.model.Element;
-import jsclub.codefest.sdk.model.ElementType;
-import jsclub.codefest.sdk.model.GameMap;
-import jsclub.codefest.sdk.model.Inventory;
+import jsclub.codefest.sdk.model.*;
 import jsclub.codefest.sdk.model.armors.Armor;
+import jsclub.codefest.sdk.model.healing_items.HealingItem;
+import jsclub.codefest.sdk.model.npcs.Ally;
 import jsclub.codefest.sdk.model.obstacles.Obstacle;
 import jsclub.codefest.sdk.model.obstacles.ObstacleTag;
 import jsclub.codefest.sdk.model.players.Player;
 import jsclub.codefest.sdk.model.weapon.Weapon;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-// // Dieu khien logic va hanh dong cua hero.
 public class HeroUtils {
     private final Hero hero;
+    private final CombatLogic combatLogic;
 
-    // // Theo doi trang thai
-    private int soRuongDaPha = 0;
-    private boolean cheDoPvp = false;
-    private Node viTriRuongBiTanCongCuoiCung = null;
+    // // State Tracking
+    private int chestsBroken = 0;
+    private boolean isPvpMode = false;
+    private Node lastAttackedChestPosition = null;
+    private String targetedItemId = null;
+    private final List<String> failedPickupIds = new ArrayList<>();
+    private Node lastPosition = null;
 
     public HeroUtils(Hero hero) {
         this.hero = hero;
+        this.combatLogic = new CombatLogic(hero);
     }
 
-    // // Vong lap logic chinh cho moi luot.
     public void executeTurn(Object... args) throws IOException {
         if (args == null || args.length == 0) return;
-
-        // // Cap nhat ban do va lay trang thai nguoi choi hien tai
         GameMap gameMap = hero.getGameMap();
         gameMap.updateOnUpdateMap(args[0]);
-        Player nguoiChoi = gameMap.getCurrentPlayer();
+        Player player = gameMap.getCurrentPlayer();
+        if (player == null || player.getHealth() == 0) return;
 
-        if (nguoiChoi == null || nguoiChoi.getHealth() == 0) return;
+        // // OPTIMIZED: Get the obstacle list only ONCE per turn.
+        List<Obstacle> allObstacles = gameMap.getListObstacles();
 
-        // // Kiem tra giai doan cua game: PvP hay Farm
-        if (cheDoPvp) {
-            xuLyLogicPvp(nguoiChoi, gameMap);
-        } else {
-            xuLyLogicFarm(nguoiChoi, gameMap);
-        }
-    }
+        if (handleHealing(player, gameMap, allObstacles)) return;
 
-    // // Logic de tim vat pham va ruong.
-    // // Logic de tim vat pham va ruong.
-    private void xuLyLogicFarm(Player nguoiChoi, GameMap gameMap) throws IOException {
-        // // *** LOGIC MOI ***
-        // // Uu tien tan cong nguoi choi o gan neu co the
-        if (kiemTraVaTanCongNguoiChoiCoHoi(nguoiChoi, gameMap)) {
-            return; // // Da tan cong hoac di chuyen, ket thuc luot
-        }
-        // // *** KET THUC LOGIC MOI ***
-
-        // // Buoc 1: Kiem tra xem co ruong nao vua bi pha khong va xu ly nhat do
-        if (xuLySauKhiDapRuong(nguoiChoi, gameMap)) {
-            return; // // Ket thuc luot sau khi thuc hien hanh dong lien quan den ruong
+        if (lastPosition == null || player.getX() != lastPosition.getX() || player.getY() != lastPosition.getY()) {
+            lastPosition = new Node(player.getX(), player.getY());
+            failedPickupIds.clear();
+            targetedItemId = null;
         }
 
-        // // Buoc 2: Tim vu khi thiet yeu con thieu
-        Inventory trangBi = hero.getInventory();
-        if (trangBi.getGun() == null) {
-            timVaDiChuyenToiVuKhi(gameMap.getAllGun(), nguoiChoi, gameMap);
-            return;
-        }
-        if (trangBi.getMelee() == null) {
-            timVaDiChuyenToiVuKhi(gameMap.getAllMelee(), nguoiChoi, gameMap);
-            return;
-        }
-
-        // // Buoc 3: Tim va tan cong ruong tiep theo
-        xuLyTimRuong(nguoiChoi, gameMap);
-    }
-
-    // // Logic tim va tan cong nguoi choi khac.
-    private void xuLyLogicPvp(Player nguoiChoi, GameMap gameMap) throws IOException {
-        System.out.println("CHẾ ĐỘ PVP: Đang tìm người chơi khác...");
-        List<Player> nguoiChoiKhac = gameMap.getOtherPlayerInfo();
-        if (nguoiChoiKhac.isEmpty()) {
-            System.out.println("Không tìm thấy người chơi nào khác.");
-            return;
-        }
-
-        Player mucTieu = getPlayerGanNhat(nguoiChoiKhac, nguoiChoi);
-        if (mucTieu == null) return;
-
-        int khoangCach = Math.abs(mucTieu.getX() - nguoiChoi.getX()) + Math.abs(mucTieu.getY() - nguoiChoi.getY());
-
-        // // Neu o canh, dung tan cong can chien
-        if (khoangCach == 1) {
-            hero.attack(getHuongTanCong(mucTieu.getX() - nguoiChoi.getX(), mucTieu.getY() - nguoiChoi.getY()));
-        } else {
-            // // Neu khong, di chuyen lai gan
-            List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
-            String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, mucTieu, true);
-            if (duongDi != null && !duongDi.isEmpty()) {
-                hero.move(duongDi);
-            }
-        }
-    }
-
-    // // Kiem tra va xu ly sau khi tan cong mot ruong.
-    // // Kiem tra va xu ly sau khi tan cong mot ruong.
-    private boolean xuLySauKhiDapRuong(Player nguoiChoi, GameMap gameMap) throws IOException {
-        if (viTriRuongBiTanCongCuoiCung == null) {
-            return false;
-        }
-
-        int chestX = viTriRuongBiTanCongCuoiCung.getX();
-        int chestY = viTriRuongBiTanCongCuoiCung.getY();
-
-        // // Kiem tra xem ruong tai vi tri do con ton tai hay khong
-        boolean ruongDaBienMat = gameMap.getListObstacles().stream()
-                .noneMatch(obs -> obs.getX() == chestX && obs.getY() == chestY);
-
-        if (ruongDaBienMat) {
-            System.out.println("Rương đã bị phá! Kiểm tra vật phẩm rơi ra...");
-
-            // // Neu chua dung tren o cua ruong, di chuyen den do
-            if (nguoiChoi.getX() != chestX || nguoiChoi.getY() != chestY) {
-                String huongDi = getHuongTanCong(chestX - nguoiChoi.getX(), chestY - nguoiChoi.getY());
-                if (huongDi != null) {
-                    hero.move(huongDi);
+        if (isPvpMode) {
+            if (!combatLogic.handleCombat(player, gameMap, this, allObstacles)) {
+                if (!findAndPickupBestItemOnMap(player, gameMap, allObstacles)) {
+                    handleChestSearch(player, gameMap, allObstacles);
                 }
-                return true; // // Ket thuc luot sau khi di chuyen
+            }
+        } else {
+            handleFarmingLogic(player, gameMap, allObstacles);
+        }
+    }
+
+    /**
+     * Handles healing logic. The hero will now find the MOST EFFICIENT healing source,
+     * considering both healing value and distance.
+     */
+    /**
+     * Handles healing logic. The hero will now find the MOST EFFICIENT healing source,
+     * considering both healing value and distance. This version is fixed and optimized.
+     */
+    /**
+     * Handles healing logic by finding the most efficient healing source (Item or Ally).
+     * This version processes items and allies separately for clarity and type safety.
+     */
+    /**
+     * Handles healing logic by finding the most efficient healing source (Item or Ally).
+     * This version is fixed and optimized.
+     */
+    private boolean handleHealing(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        if (player.getHealth() < 80) {
+            // 1. Find the best HealingItem based on its efficiency score
+            Optional<HealingItem> bestHealItemOptional = gameMap.getListHealingItems().stream()
+                    .filter(item -> calculateHealingSourceScore(item) > 0)
+                    .max(Comparator.comparingDouble(item ->
+                            calculateHealingSourceScore(item) / (PathUtils.distance(player, item) + 1.0)
+                    ));
+
+            // 2. Find the best SPIRIT ally based on its efficiency score
+            Optional<Ally> bestAllySpiritOptional = gameMap.getListAllies().stream()
+                    .filter(ally -> "SPIRIT".equals(ally.getId()))
+                    .filter(ally -> calculateHealingSourceScore(ally) > 0)
+                    .max(Comparator.comparingDouble(ally ->
+                            calculateHealingSourceScore(ally) / (PathUtils.distance(player, ally) + 1.0)
+                    ));
+
+            // 3. Calculate the final efficiency score for both, defaulting to -1 if not present
+            double itemEfficiencyScore = bestHealItemOptional
+                    .map(item -> calculateHealingSourceScore(item) / (PathUtils.distance(player, item) + 1.0))
+                    .orElse(-1.0);
+
+            double spiritEfficiencyScore = bestAllySpiritOptional
+                    .map(ally -> calculateHealingSourceScore(ally) / (PathUtils.distance(player, ally) + 1.0))
+                    .orElse(-1.0);
+
+            // If no valid healing source exists, exit
+            if (itemEfficiencyScore < 0 && spiritEfficiencyScore < 0) {
+                return false;
             }
 
-            // // Khi da dung tren o, kiem tra va nhat do tot hon
-            if (nhatDoTotHonTaiViTri(nguoiChoi, gameMap)) {
-                return true; // // Da nhat 1 mon do, ket thuc luot
+            // 4. Compare scores and determine the best target
+            Node target;
+            boolean isTargetAnItem;
+            if (itemEfficiencyScore > spiritEfficiencyScore) {
+                target = bestHealItemOptional.get();
+                isTargetAnItem = true;
+            } else {
+                target = bestAllySpiritOptional.get();
+                isTargetAnItem = false;
             }
 
-            // // Neu khong con do tot de nhat, hoan tat viec pha ruong va reset trang thai
-            System.out.println("Không có vật phẩm nào tốt hơn hoặc đã nhặt hết. Chuyển sang hành động tiếp theo.");
-            soRuongDaPha++;
-            System.out.println("Số rương đã phá: " + soRuongDaPha + "/4");
-            if (soRuongDaPha >= 4) {
-                cheDoPvp = true;
-                System.out.println("Tất cả rương đã bị phá. Chuyển sang chế độ PVP!");
+            // FIX: Cast the target to Element to access the getId() method.
+            System.out.println("Low health, moving to most EFFICIENT healing source: " + ((Element) target).getId());
+
+            // 5. Move to the target and perform action
+            String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, target, false);
+            if (path != null) {
+                if (path.isEmpty()) {
+                    if (isTargetAnItem) {
+                        hero.pickupItem();
+                    }
+                } else {
+                    hero.move(path);
+                }
+                return true;
             }
+        }
+        return false;
+    }
 
-            // // Dat lai trang thai de tim ruong moi ngay trong luot nay
-            viTriRuongBiTanCongCuoiCung = null;
+    /**
+     * Calculates a "value score" for a given healing source.
+     * High-value items like ELIXIR_OF_LIFE get a massive bonus.
+     */
+    private double calculateHealingSourceScore(Node source) {
+        if (source instanceof HealingItem item) {
+            // Base score from healing amount and percentage
+            double score = item.getHealingHP() + (item.getPoint() * 100);
 
-            // // KHONG return true o day. De logic tiep tuc chay den cac hanh dong khac (tim vu khi, tim ruong moi).
+            // Add a huge bonus for game-changing items
+            if ("ELIXIR_OF_LIFE".equals(item.getId())) {
+                score += 1000; // This item is extremely valuable
+            }
+            return score;
+        }
+
+        if (source instanceof Ally ally && "SPIRIT".equals(ally.getId())) {
+            // SPIRIT provides consistent healing, give it a solid, reliable score.
+            return 50.0;
+        }
+
+        return 0.0;
+    }
+
+    private void handleFarmingLogic(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        if (combatLogic.handleOpportunisticAttack(player, gameMap, this, allObstacles)) return;
+        if (handlePostChestBreak(player, gameMap, allObstacles)) return;
+
+        Inventory inventory = hero.getInventory();
+        if (inventory.getSpecial() == null || inventory.getGun() == null || inventory.getThrowable() == null) {
+            if (findAndPickupBestItemOnMap(player, gameMap, allObstacles)) return;
+        }
+        handleChestSearch(player, gameMap, allObstacles);
+    }
+
+    private void checkPickupResult() {
+        if (targetedItemId == null) return;
+        Inventory inventory = hero.getInventory();
+
+        Stream<Weapon> allWeapons = Stream.of(inventory.getGun(), inventory.getMelee(), inventory.getSpecial(), inventory.getThrowable());
+        boolean weaponWasPickedUp = allWeapons.filter(Objects::nonNull).anyMatch(w -> w.getId().equals(targetedItemId));
+        boolean armorWasPickedUp = (inventory.getArmor() != null && inventory.getArmor().getId().equals(targetedItemId)) ||
+                (inventory.getHelmet() != null && inventory.getHelmet().getId().equals(targetedItemId));
+
+        if (weaponWasPickedUp || armorWasPickedUp) {
+            System.out.println("Action with item '" + targetedItemId + "' was successful!");
+        } else {
+            System.out.println("Action with item '" + targetedItemId + "' failed. Adding to ignore list.");
+            failedPickupIds.add(targetedItemId);
+        }
+        targetedItemId = null;
+    }
+
+    private boolean handlePostChestBreak(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        if (lastAttackedChestPosition == null) return false;
+        checkPickupResult();
+
+        int chestX = lastAttackedChestPosition.getX();
+        int chestY = lastAttackedChestPosition.getY();
+        boolean chestIsGone = allObstacles.stream().noneMatch(obs -> obs.getX() == chestX && obs.getY() == chestY);
+
+        if (chestIsGone) {
+            if (player.getX() != chestX || player.getY() != chestY) {
+                String direction = getAttackDirection(chestX - player.getX(), chestY - player.getY());
+                if (direction != null) hero.move(direction);
+                return true;
+            }
+            if (pickupBestItemAtCurrentLocation(player, gameMap)) return true;
+
+            chestsBroken++;
+            System.out.println("Chests broken: " + chestsBroken + "/4");
+
+            if (chestsBroken >= 4) {
+                Inventory inventory = hero.getInventory();
+                if (inventory.getGun() != null || inventory.getThrowable() != null) {
+                    System.out.println("All chests broken and ranged weapon available. Engaging PVP mode!");
+                    isPvpMode = true;
+                } else {
+                    System.out.println("All chests broken, but no ranged weapon. Continuing to farm for items.");
+                }
+            }
+            lastAttackedChestPosition = null;
             return false;
         }
-
         return false;
     }
 
-    // // Tim va nhat bat ky vat pham nao tot hon tai vi tri hien tai cua nguoi choi.
-    private boolean nhatDoTotHonTaiViTri(Player nguoiChoi, GameMap gameMap) throws IOException {
-        List<Element> vatPhamTrenMatDat = getVatPhamTai(gameMap, nguoiChoi.getX(), nguoiChoi.getY());
-        Inventory trangBi = hero.getInventory();
+    private boolean pickupBestItemAtCurrentLocation(Player player, GameMap gameMap) throws IOException {
+        List<Element> itemsOnGround = getItemsAt(gameMap, player.getX(), player.getY())
+                .stream().filter(item -> !failedPickupIds.contains(item.getId())).toList();
+        if (itemsOnGround.isEmpty()) return false;
 
-        for (Element item : vatPhamTrenMatDat) {
-            if (kiemTraVatPhamCoTotHonKhong(item, trangBi)) {
-                System.out.println("Tìm thấy vật phẩm tốt hơn: " + item.getId() + ". Đang nhặt...");
-                hero.pickupItem();
-                return true; // // Da thuc hien hanh dong nhat do
+        Inventory inventory = hero.getInventory();
+        Optional<Element> bestItemOptional = itemsOnGround.stream()
+                .max(Comparator.comparingDouble(item -> calculateUpgradeScore(item, inventory)));
+
+        if (calculateUpgradeScore(bestItemOptional.get(), inventory) > 0) {
+            Element targetItem = bestItemOptional.get();
+            this.targetedItemId = targetItem.getId();
+            String itemType = determineItemType(targetItem);
+            boolean needsToDropItem = false;
+            switch (itemType) {
+                case "GUN" -> needsToDropItem = inventory.getGun() != null;
+                case "MELEE" -> needsToDropItem = inventory.getMelee() != null;
+                case "ARMOR" -> needsToDropItem = inventory.getArmor() != null;
+                case "HELMET" -> needsToDropItem = inventory.getHelmet() != null;
+                case "SPECIAL" -> needsToDropItem = inventory.getSpecial() != null;
+                case "THROWABLE" -> needsToDropItem = inventory.getThrowable() != null;
+            }
+            if (needsToDropItem) hero.revokeItem(itemType);
+            else hero.pickupItem();
+            return true;
+        }
+        return false;
+    }
+
+    public void handleChestSearch(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        List<Obstacle> chestList = gameMap.getListChests();
+        if (chestList.isEmpty()) return;
+        Obstacle targetChest = getPriorityChest(chestList, player);
+        if (targetChest == null) return;
+
+        int dx = targetChest.getX() - player.getX();
+        int dy = targetChest.getY() - player.getY();
+        if (Math.abs(dx) + Math.abs(dy) == 1) {
+            hero.attack(getAttackDirection(dx, dy));
+            lastAttackedChestPosition = new Node(targetChest.getX(), targetChest.getY());
+        } else {
+            String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, targetChest, false);
+            if (path != null && !path.isEmpty()) hero.move(path);
+        }
+    }
+
+    public boolean findAndPickupBestItemOnMap(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        Inventory inventory = hero.getInventory();
+        Optional<Element> nearestTarget = Stream.concat(gameMap.getListWeapons().stream(), gameMap.getListArmors().stream())
+                .filter(item -> calculateUpgradeScore(item, inventory) > 0)
+                .min(Comparator.comparingDouble(item -> PathUtils.distance(player, item)));
+
+        if (nearestTarget.isPresent()) {
+            Element target = nearestTarget.get();
+            String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, target, false);
+            if (path != null) {
+                if (path.isEmpty()) pickupBestItemAtCurrentLocation(player, gameMap);
+                else hero.move(path);
+                return true;
             }
         }
-        return false; // // Khong co vat pham nao tot hon de nhat
-    }
-
-
-    // // Tim va di chuyen den vu khi gan nhat.
-    private void timVaDiChuyenToiVuKhi(List<Weapon> danhSachVuKhi, Player nguoiChoi, GameMap gameMap) throws IOException {
-        Weapon vuKhiGanNhat = getVuKhiGanNhat(danhSachVuKhi, nguoiChoi);
-        if (vuKhiGanNhat == null) return;
-
-        List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
-        String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, vuKhiGanNhat, false);
-        if (duongDi == null) return;
-
-        if (duongDi.isEmpty()) hero.pickupItem();
-        else hero.move(duongDi);
-    }
-
-    // // Tim mot ruong uu tien va di chuyen de tan cong.
-    private void xuLyTimRuong(Player nguoiChoi, GameMap gameMap) throws IOException {
-        List<Obstacle> danhSachRuong = gameMap.getListChests();
-        if (danhSachRuong.isEmpty()) return;
-
-        Obstacle ruongMucTieu = getRuongUuTien(danhSachRuong, nguoiChoi);
-        if (ruongMucTieu == null) return;
-
-        int dx = ruongMucTieu.getX() - nguoiChoi.getX();
-        int dy = ruongMucTieu.getY() - nguoiChoi.getY();
-
-        if (Math.abs(dx) + Math.abs(dy) == 1) {
-            hero.attack(getHuongTanCong(dx, dy));
-            viTriRuongBiTanCongCuoiCung = new Node(ruongMucTieu.getX(), ruongMucTieu.getY()); // // Ghi nho ruong vua tan cong
-        } else {
-            List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
-            String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, ruongMucTieu, false);
-            if (duongDi != null) hero.move(duongDi);
-        }
-    }
-
-    // // --- Cac phuong thuc ho tro & tien ich ---
-
-    // // So sanh mot vat pham moi voi vat pham trong kho do.
-    private boolean kiemTraVatPhamCoTotHonKhong(Element vatPhamMoi, Inventory trangBi) {
-        if (vatPhamMoi instanceof Weapon vuKhiMoi) {
-            Weapon vuKhiHienTai = switch (vuKhiMoi.getType()) {
-                case GUN -> trangBi.getGun();
-                case MELEE -> trangBi.getMelee();
-                default -> null;
-            };
-            return vuKhiHienTai == null || vuKhiMoi.getDamage() > vuKhiHienTai.getDamage();
-        }
-        if (vatPhamMoi instanceof Armor giapMoi) {
-            Armor giapHienTai = (giapMoi.getType() == ElementType.HELMET) ? trangBi.getHelmet() : trangBi.getArmor();
-            if (giapHienTai == null) return true;
-            return giapMoi.getHealthPoint() > giapHienTai.getHealthPoint();
-        }
         return false;
     }
 
-    // // Lay tat ca vat pham tai mot toa do cu the.
-    private List<Element> getVatPhamTai(GameMap gameMap, int x, int y) {
-        List<Element> tatCaVatPham = new ArrayList<>();
-        tatCaVatPham.addAll(gameMap.getListWeapons());
-        tatCaVatPham.addAll(gameMap.getListArmors());
-        return tatCaVatPham.stream()
-                .filter(item -> item.getX() == x && item.getY() == y)
-                .collect(Collectors.toList());
+    // // === PUBLIC UTILITIES for CombatLogic ===
+
+    public double getPathUtilsDistance(Node a, Node b) { return PathUtils.distance(a, b); }
+    public String getPathUtilsShortestPath(GameMap map, List<Node> nodes, Player player, Node target, boolean isPvp) {
+        return PathUtils.getShortestPath(map, nodes, player, target, isPvp);
     }
 
-    // // Lay tat ca cac node ma hero nen tranh khi tim duong.
-    private List<Node> getCacNodeCanTranh(GameMap gameMap) {
+    public List<Player> getAttackablePlayers(GameMap gameMap) { return gameMap.getOtherPlayerInfo(); }
+    public Player getNearestPlayer(List<Player> players, Player self) {
+        return players.stream().min(Comparator.comparingDouble(p -> PathUtils.distance(self, p))).orElse(null);
+    }
+    public boolean isOutOfRangedAmmo(Inventory inv) {
+        Weapon special = inv.getSpecial();
+        Weapon gun = inv.getGun();
+        Weapon throwable = inv.getThrowable();
+        return (special == null || special.getUseCounts() <= 0) &&
+                (gun == null || gun.getUseCounts() <= 0) &&
+                (throwable == null || throwable.getUseCounts() <= 0);
+    }
+
+    public List<Node> getNodesToAvoid(GameMap gameMap, List<Obstacle> allObstacles) {
         List<Node> nodes = new ArrayList<>();
-        // // Them cac chuong ngai vat ran, khong the pha huy
-        for (Obstacle obs : gameMap.getListObstacles()) {
-            if (!obs.getTag().contains(ObstacleTag.CAN_GO_THROUGH)) {
+        for (Obstacle obs : allObstacles) {
+            if (obs.getTag().contains(ObstacleTag.TRAP) || !obs.getTag().contains(ObstacleTag.CAN_GO_THROUGH)) {
                 nodes.add(obs);
             }
         }
-        // // Tranh ca nhung nguoi choi khac
-        nodes.addAll(gameMap.getOtherPlayerInfo());
+        nodes.addAll(getAttackablePlayers(gameMap));
+        nodes.addAll(gameMap.getListEnemies());
+        gameMap.getListAllies().stream().filter(ally -> !"SPIRIT".equals(ally.getId())).forEach(nodes::add);
         return nodes;
     }
 
-    private Player getPlayerGanNhat(List<Player> players, Player self) {
-        Player nearest = null;
-        double minDistance = Double.MAX_VALUE;
-        for (Player p : players) {
-            double distance = PathUtils.distance(self, p);
-            if (distance < minDistance) {
-                minDistance = distance;
-                nearest = p;
+    private List<Node> getBulletBlockingNodes(GameMap gameMap, List<Obstacle> allObstacles) {
+        List<Node> nodes = new ArrayList<>();
+        for (Obstacle obs : allObstacles) {
+            if (!obs.getTag().contains(ObstacleTag.CAN_SHOOT_THROUGH)) {
+                nodes.add(obs);
             }
         }
-        return nearest;
+        nodes.addAll(getAttackablePlayers(gameMap));
+        return nodes;
     }
 
-    private Weapon getVuKhiGanNhat(List<Weapon> weapons, Player player) {
-        Weapon nearest = null;
-        double minDistance = Double.MAX_VALUE;
-        for (Weapon weapon : weapons) {
-            double distance = PathUtils.distance(player, weapon);
-            if (distance < minDistance) {
-                minDistance = distance;
-                nearest = weapon;
+    public boolean hasClearLineOfSight(Player player, Player target, GameMap gameMap, List<Obstacle> allObstacles) {
+        List<Node> blockingNodes = getBulletBlockingNodes(gameMap, allObstacles);
+        int x1 = player.getX(), y1 = player.getY();
+        int x2 = target.getX(), y2 = target.getY();
+        if (x1 == x2) {
+            for (int y = Math.min(y1, y2) + 1; y < Math.max(y1, y2); y++) {
+                for (Node obstacle : blockingNodes) if (obstacle.getX() == x1 && obstacle.getY() == y) return false;
             }
-        }
-        return nearest;
-    }
-
-    private Obstacle getRuongUuTien(List<Obstacle> chests, Player player) {
-        Obstacle priorityTarget = null;
-        Obstacle fallbackTarget = null;
-        double minPriorityDist = Double.MAX_VALUE;
-        double minFallbackDist = Double.MAX_VALUE;
-
-        for (Obstacle chest : chests) {
-            double dist = PathUtils.distance(player, chest);
-            if ("DRAGON_EGG".equals(chest.getId())) {
-                if (dist < minPriorityDist) {
-                    minPriorityDist = dist;
-                    priorityTarget = chest;
-                }
-            } else {
-                if (dist < minFallbackDist) {
-                    minFallbackDist = dist;
-                    fallbackTarget = chest;
-                }
+            return true;
+        } else if (y1 == y2) {
+            for (int x = Math.min(x1, x2) + 1; x < Math.max(x1, x2); x++) {
+                for (Node obstacle : blockingNodes) if (obstacle.getX() == x && obstacle.getY() == y1) return false;
             }
+            return true;
         }
-        return priorityTarget != null ? priorityTarget : fallbackTarget;
+        return false;
     }
 
-    private String getHuongTanCong(int dx, int dy) {
-        if (dx == 1) return "r";
-        if (dx == -1) return "l";
-        if (dy == 1) return "u";
-        if (dy == -1) return "d";
+    public String getAttackDirection(int dx, int dy) {
+        if (dx > 0) return "r"; if (dx < 0) return "l";
+        if (dy > 0) return "d"; if (dy < 0) return "u";
         return null;
     }
 
-    // // Kiem tra va tan cong nguoi choi o gan neu co co hoi, ngay ca khi dang farm.
-    private boolean kiemTraVaTanCongNguoiChoiCoHoi(Player nguoiChoi, GameMap gameMap) throws IOException {
-        Inventory trangBi = hero.getInventory();
-        // // Chi tan cong khi co it nhat mot vu khi
-        if (trangBi.getGun() == null && trangBi.getMelee() == null) {
-            return false;
-        }
-
-        List<Player> nguoiChoiKhac = gameMap.getOtherPlayerInfo();
-        if (nguoiChoiKhac.isEmpty()) {
-            return false;
-        }
-
-        final int KHOANG_CACH_TAN_CONG_CO_HOI = 3; // // Tam phat hien nguoi choi, co the dieu chinh
-        Player mucTieuGanNhat = null;
-        int khoangCachMin = Integer.MAX_VALUE;
-
-        // // Tim nguoi choi gan nhat trong pham vi co the tan cong
-        for (Player doiThu : nguoiChoiKhac) {
-            int khoangCach = Math.abs(doiThu.getX() - nguoiChoi.getX()) + Math.abs(doiThu.getY() - nguoiChoi.getY());
-            if (khoangCach <= KHOANG_CACH_TAN_CONG_CO_HOI && khoangCach < khoangCachMin) {
-                khoangCachMin = khoangCach;
-                mucTieuGanNhat = doiThu;
+    private double calculateUpgradeScore(Element newItem, Inventory inventory) {
+        if (newItem instanceof Weapon newWeapon) {
+            int baseScore = 0; Weapon currentWeapon = null;
+            switch (newWeapon.getType()) {
+                case SPECIAL -> { baseScore = 500; currentWeapon = inventory.getSpecial(); }
+                case GUN -> { baseScore = 400; currentWeapon = inventory.getGun(); }
+                case THROWABLE -> { baseScore = 300; currentWeapon = inventory.getThrowable(); }
+                case MELEE -> { baseScore = 100; currentWeapon = inventory.getMelee(); }
             }
+            double newScore = newWeapon.getDamage() + newWeapon.getRange();
+            if (currentWeapon == null) return baseScore + newScore;
+            double currentScore = currentWeapon.getDamage() + currentWeapon.getRange();
+            if (newScore > currentScore) return baseScore + (newScore - currentScore);
         }
-
-        if (mucTieuGanNhat != null) {
-            System.out.println("Phát hiện người chơi ở gần! Tấn công cơ hội vào: " + mucTieuGanNhat.getId());
-
-            // // Neu o ke ben, tan cong ngay
-            if (khoangCachMin == 1) {
-                hero.attack(getHuongTanCong(mucTieuGanNhat.getX() - nguoiChoi.getX(), mucTieuGanNhat.getY() - nguoiChoi.getY()));
-            } else {
-                // // Neu o xa hon, di chuyen lai gan
-                List<Node> cacNodeCanTranh = getCacNodeCanTranh(gameMap);
-                String duongDi = PathUtils.getShortestPath(gameMap, cacNodeCanTranh, nguoiChoi, mucTieuGanNhat, true);
-                if (duongDi != null && !duongDi.isEmpty()) {
-                    hero.move(duongDi);
-                }
-            }
-            return true; // // Da thuc hien hanh dong, ket thuc luot
+        if (newItem instanceof Armor newArmor) {
+            int baseScore = 200;
+            Armor currentArmor = (newArmor.getType() == ElementType.ARMOR) ? inventory.getArmor() : inventory.getHelmet();
+            double newScore = newArmor.getHealthPoint() + newArmor.getDamageReduce() * 10;
+            if (currentArmor == null) return baseScore + newScore;
+            double currentScore = currentArmor.getHealthPoint() + currentArmor.getDamageReduce() * 10;
+            if (newScore > currentScore) return baseScore + (newScore - currentScore);
         }
+        return 0.0;
+    }
 
-        return false; // // Khong co muc tieu nao trong tam
+    private String determineItemType(Element item) {
+        if (item instanceof Weapon) return ((Weapon) item).getType().name();
+        if (item instanceof Armor) return ((Armor) item).getType().name();
+        return "";
+    }
+
+    private List<Element> getItemsAt(GameMap gameMap, int x, int y) {
+        List<Element> allItems = new ArrayList<>();
+        allItems.addAll(gameMap.getListWeapons());
+        allItems.addAll(gameMap.getListArmors());
+        return allItems.stream().filter(item -> item.getX() == x && item.getY() == y).collect(Collectors.toList());
+    }
+
+    private Obstacle getPriorityChest(List<Obstacle> chests, Player player) {
+        return chests.stream()
+                .min(Comparator.comparing((Obstacle c) -> "DRAGON_EGG".equals(c.getId()) ? 0 : 1)
+                        .thenComparingDouble(c -> PathUtils.distance(player, c)))
+                .orElse(null);
     }
 }
