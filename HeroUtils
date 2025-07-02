@@ -39,7 +39,6 @@ public class HeroUtils {
         Player player = gameMap.getCurrentPlayer();
         if (player == null || player.getHealth() == 0) return;
 
-        // // OPTIMIZED: Get the obstacle list only ONCE per turn.
         List<Obstacle> allObstacles = gameMap.getListObstacles();
 
         if (handleHealing(player, gameMap, allObstacles)) return;
@@ -61,78 +60,37 @@ public class HeroUtils {
         }
     }
 
-    /**
-     * Handles healing logic. The hero will now find the MOST EFFICIENT healing source,
-     * considering both healing value and distance.
-     */
-    /**
-     * Handles healing logic. The hero will now find the MOST EFFICIENT healing source,
-     * considering both healing value and distance. This version is fixed and optimized.
-     */
-    /**
-     * Handles healing logic by finding the most efficient healing source (Item or Ally).
-     * This version processes items and allies separately for clarity and type safety.
-     */
-    /**
-     * Handles healing logic by finding the most efficient healing source (Item or Ally).
-     * This version is fixed and optimized.
-     */
     private boolean handleHealing(Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
         if (player.getHealth() < 80) {
-            // 1. Find the best HealingItem based on its efficiency score
-            Optional<HealingItem> bestHealItemOptional = gameMap.getListHealingItems().stream()
-                    .filter(item -> calculateHealingSourceScore(item) > 0)
-                    .max(Comparator.comparingDouble(item ->
-                            calculateHealingSourceScore(item) / (PathUtils.distance(player, item) + 1.0)
-                    ));
-
-            // 2. Find the best SPIRIT ally based on its efficiency score
-            Optional<Ally> bestAllySpiritOptional = gameMap.getListAllies().stream()
+            List<Node> healingSources = new ArrayList<>();
+            healingSources.addAll(gameMap.getListHealingItems());
+            gameMap.getListAllies().stream()
                     .filter(ally -> "SPIRIT".equals(ally.getId()))
-                    .filter(ally -> calculateHealingSourceScore(ally) > 0)
-                    .max(Comparator.comparingDouble(ally ->
-                            calculateHealingSourceScore(ally) / (PathUtils.distance(player, ally) + 1.0)
+                    .forEach(healingSources::add);
+
+            if (healingSources.isEmpty()) return false;
+
+            Optional<Node> bestSourceOptional = healingSources.stream()
+                    .filter(source -> calculateHealingSourceScore(source) > 0)
+                    .max(Comparator.comparingDouble(source ->
+                            calculateHealingSourceScore(source) / (PathUtils.distance(player, source) + 1.0)
                     ));
 
-            // 3. Calculate the final efficiency score for both, defaulting to -1 if not present
-            double itemEfficiencyScore = bestHealItemOptional
-                    .map(item -> calculateHealingSourceScore(item) / (PathUtils.distance(player, item) + 1.0))
-                    .orElse(-1.0);
+            if (bestSourceOptional.isPresent()) {
+                Node target = bestSourceOptional.get();
+                System.out.println("Low health, moving to most EFFICIENT healing source: " + ((Element) target).getId());
 
-            double spiritEfficiencyScore = bestAllySpiritOptional
-                    .map(ally -> calculateHealingSourceScore(ally) / (PathUtils.distance(player, ally) + 1.0))
-                    .orElse(-1.0);
-
-            // If no valid healing source exists, exit
-            if (itemEfficiencyScore < 0 && spiritEfficiencyScore < 0) {
-                return false;
-            }
-
-            // 4. Compare scores and determine the best target
-            Node target;
-            boolean isTargetAnItem;
-            if (itemEfficiencyScore > spiritEfficiencyScore) {
-                target = bestHealItemOptional.get();
-                isTargetAnItem = true;
-            } else {
-                target = bestAllySpiritOptional.get();
-                isTargetAnItem = false;
-            }
-
-            // FIX: Cast the target to Element to access the getId() method.
-            System.out.println("Low health, moving to most EFFICIENT healing source: " + ((Element) target).getId());
-
-            // 5. Move to the target and perform action
-            String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, target, false);
-            if (path != null) {
-                if (path.isEmpty()) {
-                    if (isTargetAnItem) {
-                        hero.pickupItem();
+                String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, target, false);
+                if (path != null) {
+                    if (path.isEmpty()) {
+                        if (target instanceof HealingItem) {
+                            hero.pickupItem();
+                        }
+                    } else {
+                        hero.move(path);
                     }
-                } else {
-                    hero.move(path);
+                    return true;
                 }
-                return true;
             }
         }
         return false;
@@ -140,14 +98,12 @@ public class HeroUtils {
 
     /**
      * Calculates a "value score" for a given healing source.
-     * High-value items like ELIXIR_OF_LIFE get a massive bonus.
      */
     private double calculateHealingSourceScore(Node source) {
         if (source instanceof HealingItem item) {
-            // Base score from healing amount and percentage
+            // FIX: Use the correct method names based on the HealingItem class definition.
             double score = item.getHealingHP() + (item.getPoint() * 100);
 
-            // Add a huge bonus for game-changing items
             if ("ELIXIR_OF_LIFE".equals(item.getId())) {
                 score += 1000; // This item is extremely valuable
             }
@@ -155,7 +111,7 @@ public class HeroUtils {
         }
 
         if (source instanceof Ally ally && "SPIRIT".equals(ally.getId())) {
-            // SPIRIT provides consistent healing, give it a solid, reliable score.
+            // Give SPIRIT a competitive score compared to high-tier healing items.
             return 50.0;
         }
 
@@ -167,11 +123,41 @@ public class HeroUtils {
         if (handlePostChestBreak(player, gameMap, allObstacles)) return;
 
         Inventory inventory = hero.getInventory();
-        if (inventory.getSpecial() == null || inventory.getGun() == null || inventory.getThrowable() == null) {
-            if (findAndPickupBestItemOnMap(player, gameMap, allObstacles)) return;
+        if (inventory.getGun() == null || inventory.getThrowable() == null) {
+            if (findAndPickupWeaponType(ElementType.GUN, player, gameMap, allObstacles)) return;
+            if (findAndPickupWeaponType(ElementType.THROWABLE, player, gameMap, allObstacles)) return;
         }
+        if (inventory.getMelee() == null) {
+            if (findAndPickupWeaponType(ElementType.MELEE, player, gameMap, allObstacles)) return;
+        }
+
         handleChestSearch(player, gameMap, allObstacles);
     }
+
+    private boolean findAndPickupWeaponType(ElementType weaponType, Player player, GameMap gameMap, List<Obstacle> allObstacles) throws IOException {
+        Optional<Weapon> nearestWeapon = gameMap.getListWeapons().stream()
+                .filter(w -> w.getType() == weaponType)
+                .min(Comparator.comparingDouble(w -> PathUtils.distance(player, w)));
+
+        if (nearestWeapon.isPresent()) {
+            Weapon targetWeapon = nearestWeapon.get();
+            System.out.println("Objective: Find a " + weaponType + ". Moving to " + targetWeapon.getId());
+
+            String path = PathUtils.getShortestPath(gameMap, getNodesToAvoid(gameMap, allObstacles), player, targetWeapon, false);
+            if (path != null) {
+                if (path.isEmpty()) {
+                    pickupBestItemAtCurrentLocation(player, gameMap);
+                } else {
+                    hero.move(path);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ... Các hàm còn lại được giữ nguyên như phiên bản hoàn thiện trước đó ...
+    // The rest of the methods remain unchanged from the previous complete version.
 
     private void checkPickupResult() {
         if (targetedItemId == null) return;
@@ -288,8 +274,6 @@ public class HeroUtils {
         }
         return false;
     }
-
-    // // === PUBLIC UTILITIES for CombatLogic ===
 
     public double getPathUtilsDistance(Node a, Node b) { return PathUtils.distance(a, b); }
     public String getPathUtilsShortestPath(GameMap map, List<Node> nodes, Player player, Node target, boolean isPvp) {
